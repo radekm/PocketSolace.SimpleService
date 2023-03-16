@@ -1,6 +1,7 @@
 module PocketSolace.SimpleService.SolacePubSub
 
 open System
+open System.Numerics
 open System.Threading.Channels
 
 open LibDeflateGzip
@@ -141,3 +142,69 @@ type IncomingConverter<'Incoming>(maxPayloadLen : int, f : RawMessage * Incoming
             if not disposed then
                 disposed <- true
                 decompressor.Dispose()
+
+/// This class promotes function `f : 'Outgoing -> RawMessage`
+/// to `IConverter<'Outgoing, IMessage>`.
+/// The advantage is that type `RawMessage`
+/// is normal F# record which is easier to work with than `IMessage`.
+///
+/// Payload length is limited by `maxPayloadLen` so that sent messages
+/// aren't too big to be received.
+///
+/// `RawMessage` is encoded to `IMessage` in a such way that it can be decoded by `IncomingConverter`.
+///
+/// `f` shall raise if conversion is not possible.
+type OutgoingConverter<'Outgoing>(maxPayloadLen : int, f : 'Outgoing -> RawMessage) =
+    let mutable disposed = false
+    let compressor = new Compressor(9)
+    // Payload must have at least `minPayloadLenToCompress` bytes before we try to compress it.
+    let minPayloadLenToCompress = 64
+    let mutable buffer = Array.zeroCreate (1024 * 1024)  // This will grow if necessary.
+
+    /// Raises exception when message `m` cannot be converted.
+    ///
+    /// `m` can be converted iff following conditions hold:
+    /// - `m.Payload` has length less than or equal `maxPayloadLen`.
+    let convertFromRawMessage (m : RawMessage) : IMessage =
+        if m.Payload.Memory.Length > maxPayloadLen then
+            failwith "Cannot convert outgoing message: decompressed payload is too big"
+
+        let factory = ContextFactory.Instance
+        let result = factory.CreateMessage()
+        result.Destination <- factory.CreateTopic(m.Topic)
+        m.ReplyTo |> Option.iter (fun x -> result.ReplyTo <- factory.CreateTopic(x))
+        m.ContentType |> Option.iter (fun x -> result.HttpContentType <- x)
+        m.CorrelationId |> Option.iter (fun x -> result.CorrelationId <- x)
+        m.SenderId |> Option.iter (fun x -> result.SenderId <- x)
+
+        if m.Payload.Memory.Length < minPayloadLenToCompress then
+            result.BinaryAttachment <- m.Payload.Memory.ToArray()
+        else
+            // Ensure that `buffer` for compressed data is large enough.
+            let minBufferLen = int (BitOperations.RoundUpToPowerOf2(uint m.Payload.Memory.Length))
+            if buffer.Length < minBufferLen then
+                buffer <- Array.zeroCreate minBufferLen
+
+            let n = compressor.Compress(m.Payload.Span, Span buffer)
+
+            // Use compression only if compressed payload is smaller.
+            if n = 0 || n >= m.Payload.Memory.Length then
+                result.BinaryAttachment <- m.Payload.Memory.ToArray()  // Avoid compression.
+            else
+                result.HttpContentEncoding <- "gzip"
+                result.BinaryAttachment <- buffer[0 .. n - 1]
+        result
+
+    interface IConverter<'Outgoing, IMessage> with
+        override _.Convert(m : 'Outgoing) =
+            if disposed then
+                raise (ObjectDisposedException (nameof OutgoingConverter))
+
+            m
+            |> f
+            |> convertFromRawMessage
+
+        override _.Dispose() =
+            if not disposed then
+                disposed <- true
+                compressor.Dispose()

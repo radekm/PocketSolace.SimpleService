@@ -7,6 +7,7 @@
 
     <ItemGroup>
         <Compile Include="IncomingConverterTest.fs" />
+        <Compile Include="OutgoingConverterTest.fs" />
     </ItemGroup>
 
     <ItemGroup>
