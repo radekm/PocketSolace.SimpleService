@@ -3,12 +3,14 @@ module PocketSolace.SimpleService.SolacePubSub
 open System
 open System.Numerics
 open System.Threading.Channels
+open System.Threading.Tasks
 
 open LibDeflateGzip
 open Microsoft.Extensions.Logging
+open PocketSolace
 open SolaceSystems.Solclient.Messaging
 
-open PubSub
+open PocketSolace.SimpleService.PubSub
 
 // -----------------------------------------------------------------------------------
 // Config
@@ -33,8 +35,6 @@ type SolacePubSubConfig<'Incoming, 'Outgoing> =
 
       Solace : SolaceConfig
       ClientName : string
-
-      MaxPayloadLen : int
 
       Subscriptions : string list
       SubChannel : Channel<'Incoming>
@@ -208,3 +208,176 @@ type OutgoingConverter<'Outgoing>(maxPayloadLen : int, f : 'Outgoing -> RawMessa
             if not disposed then
                 disposed <- true
                 compressor.Dispose()
+
+// -----------------------------------------------------------------------------------
+// IPubSub implementation for Solace together with connect function
+// -----------------------------------------------------------------------------------
+
+/// Used to write received Solace messages to `inner`.
+///
+/// `ChannelWriter` which gets `IMessage`s,
+/// translates them with function `f` to `'Incoming` and writes
+/// translated messages to `inner`.
+///
+/// `f` shall raise exception if `IMessage` cannot be translated.
+[<Sealed>]
+type private IncomingMessageWriter<'Incoming>
+    ( inner : ChannelWriter<'Incoming>,
+      terminationReason : TaskCompletionSource,
+      f : IMessage -> 'Incoming ) =
+
+    inherit ChannelWriter<IMessage>()
+
+    // `TryComplete` is used when PocketSolace closes the channel for received messages.
+    // That happens after an error or when user calls `ISolace.Dispose`.
+    // Closing the channel for received messages means we're terminating so we also set `terminationReason`.
+    //
+    // We actually set `terminationReason` before closing the channel. This is to ensure that
+    // `terminationReason` contains correct termination reason. Eg. if we closed channel first
+    // then background tasks would try to stop everything and one of those tasks could then
+    // set another `terminationReason` before we manage to set correct one in this thread.
+    override _.TryComplete(error) =
+        if isNull error
+        then terminationReason.TrySetResult()
+        else terminationReason.TrySetException(error)
+        |> ignore
+
+        inner.TryComplete(error)
+
+    // `TryWrite` is used when PocketSolace receives a message
+    // and wants to add it into the channel for received messages.
+    //
+    // `TryWrite` must translate the message with `f` but must not throw exception.
+    // When an exception is thrown we catch it and set it as `terminationReason`
+    // and also use it to close the channel for received messages.
+    //
+    // When the message is not written by `inner.TryWrite` we
+    // also set `terminationReason` and close the channel.
+    //
+    // So to summarize if the message is not written for any reason
+    // (either because `f` raised or `inner.TryWrite` returned `false`).
+    // the we set `terminationReason` and close the channel.
+    override me.TryWrite(solaceMessage) =
+        try
+            let m = f solaceMessage
+            let written = inner.TryWrite(m)
+            if written then
+                // Message is consumed after it's successfully written to `inner`.
+                solaceMessage.Dispose()
+            else
+                me.TryComplete(Exception "Message channel full") |> ignore
+            written
+        with e ->
+            me.TryComplete(e) |> ignore
+            false
+
+    override _.WaitToWriteAsync(token) = inner.WaitToWriteAsync(token)
+
+    override _.WriteAsync(solaceMessage, token) = raise (NotImplementedException())
+
+[<Sealed>]
+type private SolacePubSub
+    ( solace : ISolace,
+      terminationReason : TaskCompletionSource,
+      terminated : TaskCompletionSource
+    ) =
+
+    interface IPubSub with
+        override _.TerminationReason = terminationReason.Task
+        override _.Terminated = terminated.Task
+
+        override _.DisposeAsync() =
+            terminationReason.TrySetResult() |> ignore
+            solace.DisposeAsync() |> ignore  // No need to wait for this since we already wait for `terminated`.
+            ValueTask terminated.Task
+
+let inline private deferAsync ([<InlineIfLambda>] f : unit -> ValueTask) =
+    { new IAsyncDisposable with
+        override _.DisposeAsync() = f () }
+
+
+// TODO Think about clearer termination model. Eg. something like structured concurrency??
+let connect (config : SolacePubSubConfig<'Incoming, 'Outgoing>) : Task<IPubSub> =
+    Solace.initGlobalContextFactory SolLogLevel.Debug config.SolaceClientLogger
+
+    let props = Solace.createSessionProperties ()
+    props.Host <- config.Solace.Host
+    props.UserName <- config.Solace.UserName
+    props.Password <- config.Solace.Password
+    props.VPNName <- config.Solace.Vpn
+    props.ClientName <- config.ClientName
+    props.GenerateSendTimestamps <- true
+
+    backgroundTask {
+        // Set when we start terminating or when we see `ISolace.TerminationReason`.
+        let terminationReason = TaskCompletionSource()
+        let terminated = TaskCompletionSource()  // Set after both `ISolace` and publishing task terminates.
+
+        // For simplicity we don't bother disposing these. Instead we rely on GC to do it.
+        let subConverter = config.SubConverter ()
+        let pubConverter = config.PubConverter ()
+
+        let writer = IncomingMessageWriter(config.SubChannel.Writer, terminationReason, subConverter.Convert)
+
+        let! solace = Solace.connect config.PocketSolaceLogger props writer
+        let mutable disposeSolace = true
+        use _ = deferAsync (fun () ->
+            if disposeSolace
+            then solace.DisposeAsync()
+            else ValueTask.CompletedTask)
+
+        for s in config.Subscriptions do
+            do! solace.Subscribe(s)
+
+        let publishingTask = backgroundTask {
+            while not terminationReason.Task.IsCompleted do
+                try
+                    let! outgoing = config.PubChannel.Reader.ReadAsync()
+                    let m = pubConverter.Convert outgoing
+                    do! solace.Send(m)
+                with :? ChannelClosedException as e ->
+                    terminationReason.TrySetException(Exception "Pub channel was closed") |> ignore
+                    raise e  // For some reason we can't use `reraise ()` here.
+        }
+
+        // If `publishingTask` stops or we get disconnected from Solace then propagate/set termination reason.
+        publishingTask.ContinueWith(Action<Task>(fun task ->
+            config.PubSubLogger.LogInformation(task.Exception, "Publishing task stopped")
+            if task.IsFaulted
+            then terminationReason.TrySetException(task.Exception) |> ignore
+            else
+                if terminationReason.TrySetException(Exception("Publishing task stopped")) then
+                    config.PubSubLogger.LogWarning("Publishing task stopped but no termination reason was set")
+        )) |> ignore
+        solace.Terminated.ContinueWith(Action<Task>(fun task ->
+            config.PubSubLogger.LogInformation(task.Exception, "Solace stopped")
+            if task.IsFaulted
+            then terminationReason.TrySetException(task.Exception) |> ignore
+            else
+                if terminationReason.TrySetException(Exception("Solace terminated")) then
+                    config.PubSubLogger.LogWarning("Solace terminated without exception")
+        )) |> ignore
+
+        // If we have termination reason then close both channels.
+        terminationReason.Task.ContinueWith(Action<Task>(fun reason ->
+            config.PubSubLogger.LogInformation(reason.Exception, "Termination reason was set")
+            if reason.IsFaulted then
+                config.SubChannel.Writer.TryComplete(reason.Exception) |> ignore
+                config.PubChannel.Writer.TryComplete(reason.Exception) |> ignore
+            else
+                config.SubChannel.Writer.TryComplete() |> ignore
+                config.PubChannel.Writer.TryComplete() |> ignore
+            solace.DisposeAsync() |> ignore
+        )) |> ignore
+
+        // Mark `IPubSub` as terminated after both publishing task stops and we get disconnected from Solace.
+        Task.WhenAll(solace.Terminated, publishingTask).ContinueWith(Action<Task>(fun task ->
+            config.PubSubLogger.LogInformation("PubSub terminated")
+            terminated.SetResult()
+        )) |> ignore
+
+        let pubSub = SolacePubSub(solace, terminationReason, terminated)
+        disposeSolace <- false  // Now it's the responsibility of `pubSub` to dispose `solace`.
+
+        return pubSub :> IPubSub
+    }
