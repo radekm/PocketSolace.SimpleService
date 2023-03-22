@@ -22,14 +22,14 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <None Include="..\LICENSE.txt" Pack="true" PackagePath="LICENSE.txt"/>
+        <None Include="..\LICENSE.txt" Pack="true" PackagePath="\" />
         <Compile Include="Signals.fs" />
         <Compile Include="PubSub.fs" />
         <Compile Include="SolacePubSub.fs" />
     </ItemGroup>
 
     <ItemGroup>
-      <PackageReference Include="LibDeflateGzip" Version="0.2.0" />
+      <PackageReference Include="LibDeflateGzip" Version="0.3.0" />
       <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="7.0.0" />
       <PackageReference Include="PocketSolace" Version="0.2.2" />
     </ItemGroup>
