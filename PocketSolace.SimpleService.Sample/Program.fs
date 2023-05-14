@@ -5,86 +5,110 @@ open System.Threading.Channels
 open System.Threading.Tasks
 
 open Microsoft.Extensions.Logging
+open PocketSolace
 
-open PocketSolace.SimpleService.PubSub
-open PocketSolace.SimpleService.SolacePubSub
+open PocketSolace.SimpleService
+
+/// Like defer from Zig or Go.
+let inline private deferAsync ([<InlineIfLambda>] f : unit -> ValueTask) =
+    { new IAsyncDisposable with
+        override _.DisposeAsync() = f () }
+
+type Event =
+    | IncomingMessage of IncomingMetadata * Message<string>
+    | SendSignal of int
+    | Stop
+
+type Processor(destTopic : string) =
+    let mutable active = true
+
+    interface MessageLoop.IProcessor<Event, Message<string>> with
+        override _.Active = active
+        override _.Process(input) =
+            match input with
+            | IncomingMessage (meta, message) ->
+                Console.WriteLine("Received message {0} -- {1}", meta, message)
+                []
+            | SendSignal i ->
+                Console.WriteLine("Sending message {0}", i)
+                [ { Topic = destTopic
+                    ReplyTo = None
+                    CorrelationId = None
+                    SenderId = None
+                    Payload = $"Message %d{i}" } ]
+            | Stop ->
+                Console.WriteLine("Stopping processor")
+                active <- false
+                []
 
 [<EntryPoint>]
 let main args =
-    let loggerFactory = LoggerFactory.Create(fun l -> l.AddConsole().SetMinimumLevel(LogLevel.Information) |> ignore)
-    let solaceClientLogger = loggerFactory.CreateLogger("Solace Client")
-    let pocketSolaceLogger = loggerFactory.CreateLogger("Pocket Solace")
-    let pubSubLogger = loggerFactory.CreateLogger("PubSub")
+    let enableReconnect = false
 
+    let loggerFactory = LoggerFactory.Create(fun l -> l.AddConsole().SetMinimumLevel(LogLevel.Information) |> ignore)
     let testTopic = Environment.GetEnvironmentVariable("SOLACE_TEST_TOPIC")
     if String.IsNullOrWhiteSpace testTopic then
         failwith "SOLACE_TEST_TOPIC environment variable must be non-empty"
 
-    let solace = { Host = Environment.GetEnvironmentVariable("SOLACE_HOST")
-                   UserName = Environment.GetEnvironmentVariable("SOLACE_USER")
-                   Password = Environment.GetEnvironmentVariable("SOLACE_PASSWORD")
-                   Vpn = Environment.GetEnvironmentVariable("SOLACE_VPN") }
-    let maxPayloadLen = 1024 * 1024
+    let solaceConfig = { Host = Environment.GetEnvironmentVariable("SOLACE_HOST")
+                         UserName = Environment.GetEnvironmentVariable("SOLACE_USER")
+                         Password = Environment.GetEnvironmentVariable("SOLACE_PASSWORD")
+                         Vpn = Environment.GetEnvironmentVariable("SOLACE_VPN") }
 
-    let subChannel = Channel.CreateBounded<Message<string> * IncomingMetadata>(512)
-    let pubChannel = Channel.CreateBounded<Message<string>>(512)
+    let inputs = Channel.CreateBounded<Event>(512)
 
-    let config =
-        { SolaceClientLogger = solaceClientLogger
-          PocketSolaceLogger = pocketSolaceLogger
-          PubSubLogger = pubSubLogger
+    let parameters : MessageLoop.Parameters<Event, Message<string>> =
+        { LoggerFactory = loggerFactory
 
-          Solace = solace
-          ClientName = "PocketSolace.SimpleService.Sample"
+          SolaceConfig = solaceConfig
+          SolaceClientNamePrefix = "PocketSolace.SimpleService.Sample"
 
-          Subscriptions = [testTopic]
-          SubChannel = subChannel
-          SubConverter = fun () ->
-              new IncomingConverter<_>(maxPayloadLen, fun (m, meta) ->
-                  { Topic = m.Topic
-                    ReplyTo = m.ReplyTo
-                    ContentType = m.ContentType
-                    CorrelationId = m.CorrelationId
-                    SenderId = m.SenderId
-                    Payload = Encoding.UTF8.GetString m.Payload.Span
-                  }, meta)
+          SolaceSubscriptions = [testTopic]
+          MaxDecompressedPayloadLen = 1024 * 1024
+          SolaceInConverter = fun (meta, byteMessage) ->
+              [ IncomingMessage (meta, byteMessage.MapPayload(fun bytes -> Encoding.UTF8.GetString bytes.Span)) ]
+          SolaceOutConverter = fun message ->
+              [ message.MapPayload(fun str -> Bytes (Encoding.UTF8.GetBytes str |> ReadOnlyMemory)) ]
 
-          PubChannel = pubChannel
-          PubConverter = fun () ->
-              new OutgoingConverter<_>(maxPayloadLen, fun m ->
-                  { Topic = m.Topic
-                    ReplyTo = m.ReplyTo
-                    ContentType = m.ContentType
-                    CorrelationId = m.CorrelationId
-                    SenderId = m.SenderId
-                    Payload = Bytes (Encoding.UTF8.GetBytes m.Payload |> ReadOnlyMemory)
-                  })
+          Inputs = inputs
+          Processor = Processor(testTopic)
         }
 
+    backgroundTask {
+        use _ = deferAsync (fun () -> inputs.Writer.WriteAsync(Stop) )
+        for i in 1 .. 100 do
+            do! inputs.Writer.WriteAsync(SendSignal i)
+            do! Task.Delay(1000)
+    } |> ignore
 
-    let mainTask = backgroundTask {
-        use! _pubSub = connect config
+    // Terminates immediately after connection to Solace is lost.
+    let messageLoopWithoutReconnect () = MessageLoop.run parameters
 
-        do! pubChannel.Writer.WriteAsync(
-            { Topic = testTopic
-              ReplyTo = None
-              ContentType = None
-              CorrelationId = None
-              SenderId = None
-              Payload = "Hi, we're testing SimpleService" })
-
-        // Disconnect after 10 seconds.
-        backgroundTask {
-            do! Task.Delay(10_000)
-            Console.WriteLine("Disposing PubSub")
-            do! _pubSub.DisposeAsync()
-        } |> ignore
-
-        while true do
-            let! msg, meta = subChannel.Reader.ReadAsync()
-            Console.WriteLine("Got {0} -- {1}", meta, msg)
+    // Note that after disconnect from Solace processor still runs until the disconnect is detected
+    // by Solace. This also means that messages send to Solace immediately before disconnect or after disconnect
+    // will be lost -- these messages won't delivered to Solace broker.
+    //
+    // Additional difficulty comes from background task which is writing `SendSignal i` to the channel `inputs`.
+    // This task doesn't pause during disconnect. That means it's still writing to the channel
+    // and if the size of the channel wasn't big enough it could fill it completely which
+    // in more complex applications could lead to unexpected behavior.
+    let messageLoopWithReconnect () = backgroundTask {
+        while parameters.Processor.Active do
+            Console.WriteLine("Starting message loop")
+            try
+                do! MessageLoop.run parameters
+                if parameters.Processor.Active then
+                    // Weird behavior. Should never happen!!!
+                    failwith "Bug: Message loop stopped without exception but processor is active"
+                else
+                    Console.WriteLine("Message loop stopped because processor became inactive")
+            with e ->
+                Console.WriteLine("Message loop stopped with {0}", e)
     }
 
-    Task.WaitAll(mainTask)
+    if enableReconnect
+    then Task.WaitAll(messageLoopWithReconnect ())
+    else Task.WaitAll(messageLoopWithoutReconnect ())
+    Console.WriteLine("Terminating normally :-)")
 
     0
