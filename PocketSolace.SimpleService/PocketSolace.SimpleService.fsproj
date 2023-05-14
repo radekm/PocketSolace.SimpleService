@@ -5,7 +5,7 @@
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
 
         <PackageId>PocketSolace.SimpleService</PackageId>
-        <PackageVersion>0.2.0</PackageVersion>
+        <PackageVersion>1.0.0</PackageVersion>
         <Authors>Radek Miček</Authors>
         <Copyright>Copyright (c) 2023, Radek Miček</Copyright>
         <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
