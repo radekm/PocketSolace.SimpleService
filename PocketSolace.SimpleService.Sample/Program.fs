@@ -32,7 +32,6 @@ type Processor(destTopic : string) =
             | SendSignal i ->
                 Console.WriteLine("Sending message {0}", i)
                 [ { Topic = destTopic
-                    ReplyTo = None
                     CorrelationId = None
                     SenderId = None
                     Payload = $"Message %d{i}" } ]

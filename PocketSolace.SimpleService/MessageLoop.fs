@@ -40,9 +40,7 @@ type Bytes =
 
 /// `'T` should use structural equality.
 type Message<'T> =
-    { // Topics.
-      Topic : string
-      ReplyTo : string option
+    { Topic : string
 
       // Metadata.
       CorrelationId : string option
@@ -53,7 +51,6 @@ type Message<'T> =
 
     with
         member me.MapPayload<'U>(f : 'T -> 'U) = { Topic = me.Topic
-                                                   ReplyTo = me.ReplyTo
                                                    CorrelationId = me.CorrelationId
                                                    SenderId = me.SenderId
                                                    Payload = f me.Payload
@@ -221,7 +218,6 @@ module MessageLoop =
                     failwith "Decompressed payload is too big"
 
                 let byteMessage = { Topic = rawMessage.Topic
-                                    ReplyTo = rawMessage.ReplyTo
                                     CorrelationId = rawMessage.CorrelationId
                                     SenderId = rawMessage.SenderId
                                     Payload = Bytes decompressedPayload
@@ -281,7 +277,6 @@ module MessageLoop =
                                     Some Gzip, buffer[0 .. n - 1]
 
                         let rawMessage = { Topic = byteMessage.Topic
-                                           ReplyTo = byteMessage.ReplyTo
                                            ContentType = None
                                            ContentEncoding = encoding
                                            CorrelationId = byteMessage.CorrelationId
