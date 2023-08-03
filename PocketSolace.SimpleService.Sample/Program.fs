@@ -85,7 +85,7 @@ let main args =
 
     // Note that after disconnect from Solace processor still runs until the disconnect is detected
     // by Solace. This also means that messages send to Solace immediately before disconnect or after disconnect
-    // will be lost -- these messages won't delivered to Solace broker.
+    // will be lost -- these messages won't be delivered to Solace broker.
     //
     // Additional difficulty comes from background task which is writing `SendSignal i` to the channel `inputs`.
     // This task doesn't pause during disconnect. That means it's still writing to the channel

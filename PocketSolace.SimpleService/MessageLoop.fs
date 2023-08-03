@@ -38,13 +38,16 @@ type Bytes =
         let (Bytes bytes) = me
         bytes.Length
 
+type CorrelationId = string
+type SenderId = string
+
 /// `'T` should use structural equality.
 type Message<'T> =
     { Topic : string
 
       // Metadata.
-      CorrelationId : string option
-      SenderId : string option
+      CorrelationId : CorrelationId option
+      SenderId : SenderId option
 
       Payload : 'T
     }
