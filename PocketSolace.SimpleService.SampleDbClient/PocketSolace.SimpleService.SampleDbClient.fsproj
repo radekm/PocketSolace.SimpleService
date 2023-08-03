@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net7.0</TargetFramework>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="ClientProgram.fs" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\PocketSolace.SimpleService.SampleDbService\PocketSolace.SimpleService.SampleDbService.fsproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Avalonia.Desktop" Version="11.0.2" />
+      <PackageReference Include="Avalonia.Diagnostics" Version="11.0.2" />
+      <PackageReference Include="Avalonia.Themes.Fluent" Version="11.0.2" />
+    </ItemGroup>
+
+</Project>
