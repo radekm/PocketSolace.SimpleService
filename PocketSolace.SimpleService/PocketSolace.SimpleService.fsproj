@@ -5,12 +5,12 @@
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
 
         <PackageId>PocketSolace.SimpleService</PackageId>
-        <PackageVersion>1.0.0</PackageVersion>
+        <PackageVersion>1.1.0</PackageVersion>
         <Authors>Radek Miček</Authors>
         <Copyright>Copyright (c) 2023, Radek Miček</Copyright>
         <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
         <Description>
-            Library for building microservices in F# which are connected through Solace.
+            Library for building microservices in F# which communicate via Solace.
             Provided interface fits nicely in async code.
         </Description>
 
