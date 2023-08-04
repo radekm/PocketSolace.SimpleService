@@ -27,6 +27,11 @@ module TopicsOfService =
     let checkServiceName (serviceName : string) =
         if isNull serviceName then
             failwith "Service name must not be null"
+        if serviceName.StartsWith '_' then
+            // Because every topic in our convention starts with service name
+            // and Solace documentation states that Solace reserves topics starting with `#` or `_`
+            // we forbid service name to start with `_`.
+            failwith "Service name must not start with underscore"
         let parts = serviceName.Split '/'
         if parts.Length <> 3 then
             failwith "Service name must have 3 parts"
@@ -179,6 +184,8 @@ module TopicsOfService =
 /// - When command is sent with correlation id then `CommandReader` returns `ReplyContext`.
 /// - This class can also be used for client applications which are like services but don't publish feed
 ///   and don't receive commands.
+/// - Our convention intentionally avoids Solace P2P topics because other services can't
+///   subscribe to them and record them.
 type TopicsOfService<'Feed, 'Command, 'Reply>
     ( serviceName : string,
       readFeed : ReadOnlyMemory<byte> -> 'Feed,
