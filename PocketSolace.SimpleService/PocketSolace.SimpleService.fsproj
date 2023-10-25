@@ -29,9 +29,10 @@
     </ItemGroup>
 
     <ItemGroup>
-      <PackageReference Include="LibDeflateGzip" Version="0.4.0" />
+      <PackageReference Include="LibDeflateGzip" Version="0.5.0" />
       <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="7.0.1" />
-      <PackageReference Include="PocketSolace" Version="1.2.0" />
+      <PackageReference Include="PocketSolace" Version="1.3.0" />
+      <PackageReference Update="FSharp.Core" Version="7.0.401" />
     </ItemGroup>
 
 </Project>
