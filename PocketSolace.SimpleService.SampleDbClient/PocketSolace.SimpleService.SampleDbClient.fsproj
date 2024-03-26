@@ -14,9 +14,9 @@
     </ItemGroup>
 
     <ItemGroup>
-      <PackageReference Include="Avalonia.Desktop" Version="11.0.5" />
-      <PackageReference Include="Avalonia.Diagnostics" Version="11.0.5" />
-      <PackageReference Include="Avalonia.Themes.Fluent" Version="11.0.5" />
+      <PackageReference Include="Avalonia.Desktop" Version="11.0.10" />
+      <PackageReference Include="Avalonia.Diagnostics" Version="11.0.10" />
+      <PackageReference Include="Avalonia.Themes.Fluent" Version="11.0.10" />
       <PackageReference Update="FSharp.Core" Version="8.0.200" />
     </ItemGroup>
 
